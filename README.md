@@ -45,8 +45,21 @@ docker compose down        # 停止并移除容器（数据在浏览器本地，
 - **v1**：建 `matrices` 表（含 code / character / font / sizeName / material / availability 索引）
 - **v2**：加 `cases` 表与 `matrixId` 多值索引；升级时按 `slots` 回填历史字盘的 `matrixId`
 - **v3**：加 `defects`、`proofs` 表；升级时为「停用 / 待补刻」的历史字模回填缺损原因记录
+- **v4**：为历史字盘补出布局版本（`layoutVersion` 令牌 / `layoutSavedAt`），支撑多页面按格位合并保存
 
 首次打开且库为空时会写入一批示例档案（16 枚字模、2 个字盘、5 条缺损、6 条试印），便于直接体验；已有数据则跳过。
+
+### 字盘布局的按格位合并保存（v4）
+
+两个页面（标签页）同时编辑同一只字盘时，不再整盘互相覆盖，而是按格位做三方合并：
+
+- 打开字盘时记录**基线布局**（`layoutVersion` 对应版本）；未保存的落位 / 取出 / 调换与逐格裁决写入 localStorage 编辑会话（前缀 `gbmovabletype-case-session:`），**关页再开仍能继续处理冲突**。
+- 保存时以 `layoutVersion` 做乐观并发：落库版本未变 → 直接入库并换新令牌；已被别的页面更新 → 按「基线 / 本次 / 已存」三方合并：
+  - 只有一方动过的格位（落位、取出、调换）自动并入；
+  - 同一格双方都动过且改成不同内容 → 列为**冲突**，在冲突面板逐格「采用本次 / 采用已存 / 双方都取出」，**确认前不更新已保存布局**。
+- 页面之间通过 `BroadcastChannel`（不支持时回退 `storage` 事件）广播 `cases-changed` / `matrices-changed`：别的页面一保存，本页静默重读并立即重算合并结果。
+- **字模可用性变化**（登记缺损停用、转待补刻、补刻恢复、删除）后，相关字盘里引用该字模的旧落位立即判**失效**（停用 / 待补刻 / 已删除），在编辑器中逐格或一键取出，**处理前不能保存**。
+- 旧字盘没有版本数据时，v4 升级按当前 `slots` 补出初始版本；旧版布局草稿（`gbmovabletype-draft:case-*`）首次打开时自动迁入编辑会话。
 
 ## 页面与路由
 
@@ -82,13 +95,14 @@ docker compose down        # 停止并移除容器（数据在浏览器本地，
         ├── layouts/AppShell.tsx
         ├── pages/{Overview,MatrixNew,MatrixDetail,CaseEditor,DefectBoard,ProofList}.tsx
         ├── router/index.tsx
-        └── utils/{charIndex,layout,format}.ts
+        └── utils/{charIndex,layout,broadcast,caseSession,format}.ts
 ```
 
 ## 数据存储说明
 
 - **业务数据**：IndexedDB（Dexie，库名 `gbmovabletype-db`，共 4 张表 `matrices` / `cases` / `defects` / `proofs`）。写入前统一 `toPlain()` 深拷贝，避免响应式对象写库抛 `DataCloneError`。
-- **草稿数据**：localStorage，前缀 `gbmovabletype-draft:`，覆盖字模登记、字盘布局、缺损登记、试印登记四处表单，刷新后可恢复。
+- **草稿数据**：localStorage，前缀 `gbmovabletype-draft:`，覆盖字模登记、缺损登记、试印登记等表单，刷新后可恢复。
+- **字盘编辑会话**：localStorage，前缀 `gbmovabletype-case-session:`，保存三方合并基线、未保存格位改动与逐格冲突裁决，关页再开可继续处理。
 - **界面偏好**：localStorage，键 `gbmovabletype-ui`（Zustand persist，保存筛选条件与当前选中字盘）。
 - 容器完全无状态：不挂载命名卷、不连接数据库服务，删除重建容器不影响浏览器里的档案。
 

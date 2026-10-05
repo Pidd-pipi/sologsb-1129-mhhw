@@ -49,6 +49,7 @@ export default function MatrixDetail() {
   const repairMatrix = useMatrixStore((s) => s.repairMatrix);
   const removeMatrix = useMatrixStore((s) => s.removeMatrix);
   const cases = useCaseStore((s) => s.cases);
+  const setSelectedCaseId = useUiStore((s) => s.setSelectedCaseId);
   const pushToast = useUiStore((s) => s.pushToast);
 
   const matrix = matrices.find((m) => m.id === id);
@@ -358,6 +359,11 @@ export default function MatrixDetail() {
               </p>
             ) : (
               <div className="space-y-4">
+                {matrix.availability !== '可用' ? (
+                  <p className="text-xs text-seal" data-testid="holding-invalid-hint">
+                    字模当前为「{matrix.availability}」，以下格位中的旧落位已判失效，请到「字盘布局」逐盘取出处理后才能保存。
+                  </p>
+                ) : null}
                 {holdings.map((h) => (
                   <div key={h.typeCase.id} className="space-y-2">
                     <p className="text-xs text-ink-soft">
@@ -365,12 +371,23 @@ export default function MatrixDetail() {
                       {h.slots
                         .map((s) => `${String.fromCharCode(65 + s.row)}${s.col + 1}`)
                         .join('、')}
+                      {matrix.availability !== '可用' ? (
+                        <Link
+                          className="ml-2 underline"
+                          to="/cases"
+                          data-testid={`goto-case-${h.typeCase.id}`}
+                          onClick={() => setSelectedCaseId(h.typeCase.id)}
+                        >
+                          前往处理
+                        </Link>
+                      ) : null}
                     </p>
                     <LayoutGrid
                       rows={h.typeCase.rows}
                       cols={h.typeCase.cols}
                       slots={h.typeCase.slots}
                       highlightKeys={h.slots.map((s) => rcKey(s.row, s.col))}
+                      invalidKeys={matrix.availability !== '可用' ? h.slots.map((s) => rcKey(s.row, s.col)) : []}
                       readOnly
                       testIdPrefix="detail-slot"
                     />

@@ -3,7 +3,16 @@ import { db, ensureSeed } from '../db';
 import type { CaseInput, CaseSlot, TypeCase } from '../types/case';
 import { capacityOf } from '../types/case';
 import { makeId, toPlain } from '../utils/format';
+import { broadcastSignal } from '../utils/broadcast';
 import { matrixIdsOf, validateCapacity } from '../utils/layout';
+
+/** 保存布局时发现落库版本已被别人更新 */
+export class LayoutStaleError extends Error {
+  constructor(public latest: TypeCase) {
+    super('字盘布局已被别的页面更新，需要按格位合并后再保存');
+    this.name = 'LayoutStaleError';
+  }
+}
 
 interface CaseState {
   cases: TypeCase[];
@@ -11,10 +20,16 @@ interface CaseState {
   loading: boolean;
   error: string;
   load: () => Promise<void>;
+  /** 其它页面保存后静默刷新（不打断编辑、不弹错误） */
+  reloadQuiet: () => Promise<void>;
   createCase: (input: CaseInput) => Promise<TypeCase>;
   updateCase: (id: string, patch: Partial<TypeCase>) => Promise<void>;
-  saveSlots: (id: string, slots: CaseSlot[]) => Promise<void>;
+  saveSlots: (id: string, slots: CaseSlot[], expectedVersion?: string) => Promise<TypeCase>;
   removeCase: (id: string) => Promise<void>;
+}
+
+function sortByCode(list: TypeCase[]): TypeCase[] {
+  return [...list].sort((a, b) => (a.code < b.code ? -1 : 1));
 }
 
 export const useCaseStore = create<CaseState>((set, get) => ({
@@ -28,9 +43,19 @@ export const useCaseStore = create<CaseState>((set, get) => ({
     try {
       await ensureSeed();
       const cases = await db.cases.toArray();
-      set({ cases: cases.sort((a, b) => (a.code < b.code ? -1 : 1)), loaded: true, loading: false });
+      set({ cases: sortByCode(cases), loaded: true, loading: false });
     } catch (err) {
       set({ loading: false, error: err instanceof Error ? err.message : '字盘档案读取失败' });
+    }
+  },
+
+  reloadQuiet: async () => {
+    try {
+      await ensureSeed();
+      const cases = await db.cases.toArray();
+      set({ cases: sortByCode(cases), loaded: true });
+    } catch {
+      /* 静默刷新失败时保留当前内存数据，下个信号或手动操作再试 */
     }
   },
 
@@ -47,12 +72,15 @@ export const useCaseStore = create<CaseState>((set, get) => ({
       slots: [] as CaseSlot[],
       workStation: input.workStation.trim(),
       matrixId: [] as string[],
+      layoutVersion: makeId('lay'),
+      layoutSavedAt: now,
       createdAt: now,
       updatedAt: now,
     });
     if (capacityOf(rows, cols) <= 0) throw new Error('字盘容量不合法，请检查行列数');
     await db.cases.add(row);
-    set((s) => ({ cases: [...s.cases, row].sort((a, b) => (a.code < b.code ? -1 : 1)) }));
+    set((s) => ({ cases: sortByCode([...s.cases, row]) }));
+    broadcastSignal('cases-changed', row.id);
     return row;
   },
 
@@ -69,27 +97,44 @@ export const useCaseStore = create<CaseState>((set, get) => ({
     }
     await db.cases.update(id, next);
     set((s) => ({ cases: s.cases.map((c) => (c.id === id ? { ...c, ...next } : c)) }));
+    broadcastSignal('cases-changed', id);
   },
 
-  /** 保存格位布局：同时刷新 matrixId 多值索引，便于按字模反查字盘 */
-  saveSlots: async (id, slots) => {
-    const current = get().cases.find((c) => c.id === id);
+  /**
+   * 保存格位布局（按格位合并保存的落库端）：
+   * - 同时刷新 matrixId 多值索引；
+   * - 更换布局版本令牌，供另一个打开页面识别「别人已保存」并做三方合并；
+   * - 带 expectedVersion 做乐观并发：落库版本已被别人更新时抛 LayoutStaleError，
+   *   本次布局不覆盖已存数据，由编辑会话按格位合并后再保存。
+   */
+  saveSlots: async (id, slots, expectedVersion) => {
+    const current = await db.cases.get(id);
     if (!current) throw new Error('未找到字盘');
+    if (expectedVersion !== undefined && current.layoutVersion !== expectedVersion) {
+      throw new LayoutStaleError(current);
+    }
     const check = validateCapacity(current.rows, current.cols, slots);
     if (check.overCapacity) throw new Error(check.message);
+    const nowIso = new Date().toISOString();
     const plainSlots = toPlain(slots);
-    const next: Partial<TypeCase> = {
+    const next: TypeCase = {
+      ...current,
       slots: plainSlots,
       matrixId: matrixIdsOf(plainSlots),
-      updatedAt: new Date().toISOString(),
+      layoutVersion: makeId('lay'),
+      layoutSavedAt: nowIso,
+      updatedAt: nowIso,
     };
-    await db.cases.update(id, next);
-    set((s) => ({ cases: s.cases.map((c) => (c.id === id ? { ...c, ...next } : c)) }));
+    await db.cases.put(next);
+    set((s) => ({ cases: s.cases.map((c) => (c.id === id ? next : c)) }));
+    broadcastSignal('cases-changed', id);
+    return next;
   },
 
   removeCase: async (id) => {
     await db.cases.delete(id);
     set((s) => ({ cases: s.cases.filter((c) => c.id !== id) }));
+    broadcastSignal('cases-changed', id);
   },
 }));
 

@@ -1,5 +1,6 @@
 import { create } from 'zustand';
 import { db, ensureSeed } from '../db';
+import { broadcastSignal } from '../utils/broadcast';
 import type { DefectInput, DefectLog } from '../types/defect';
 import { shouldDisableMatrix } from '../types/defect';
 import type { MatrixInput, TypeMatrix } from '../types/matrix';
@@ -15,6 +16,8 @@ interface MatrixState {
   loading: boolean;
   error: string;
   load: () => Promise<void>;
+  /** 其它页面改了字模 / 缺损后静默刷新，字盘页据此重算失效落位 */
+  reloadQuiet: () => Promise<void>;
   createMatrix: (input: MatrixInput) => Promise<TypeMatrix>;
   updateMatrix: (id: string, patch: Partial<TypeMatrix>) => Promise<void>;
   removeMatrix: (id: string) => Promise<void>;
@@ -55,6 +58,26 @@ export const useMatrixStore = create<MatrixState>((set, get) => ({
     }
   },
 
+  /** 其它页面广播变更后静默重读（不切换 loading，避免打断正在编辑的页面） */
+  reloadQuiet: async () => {
+    try {
+      await ensureSeed();
+      const [matrices, defects, proofs] = await Promise.all([
+        db.matrices.toArray(),
+        db.defects.toArray(),
+        db.proofs.toArray(),
+      ]);
+      set({
+        matrices: matrices.sort(byUpdatedDesc),
+        defects,
+        proofs,
+        loaded: true,
+      });
+    } catch {
+      /* 静默刷新失败时保留当前内存数据 */
+    }
+  },
+
   createMatrix: async (input) => {
     const now = new Date().toISOString();
     const row: TypeMatrix = toPlain({
@@ -76,6 +99,7 @@ export const useMatrixStore = create<MatrixState>((set, get) => ({
     });
     await db.matrices.add(row);
     set((s) => ({ matrices: [row, ...s.matrices] }));
+    broadcastSignal('matrices-changed', row.id);
     return row;
   },
 
@@ -89,6 +113,8 @@ export const useMatrixStore = create<MatrixState>((set, get) => ({
         .map((m) => (m.id === id ? { ...m, ...next } : m))
         .sort(byUpdatedDesc),
     }));
+    // 可用性变化（停用 / 待补刻 / 恢复可用）后，相关字盘的旧编辑立即失效重算
+    broadcastSignal('matrices-changed', id);
   },
 
   removeMatrix: async (id) => {
@@ -104,6 +130,7 @@ export const useMatrixStore = create<MatrixState>((set, get) => ({
       defects: s.defects.filter((d) => d.matrixId !== id),
       proofs: s.proofs.filter((p) => p.matrixId !== id),
     }));
+    broadcastSignal('matrices-changed', id);
   },
 
   /** 登记缺损：写入缺损记录，并按结论自动停用字模 */
@@ -127,7 +154,10 @@ export const useMatrixStore = create<MatrixState>((set, get) => ({
     await db.defects.add(row);
     set((s) => ({ defects: [row, ...s.defects] }));
     if (shouldDisableMatrix(input.availability)) {
+      // updateMatrix 内部会广播 matrices-changed，触发字盘失效重算
       await get().updateMatrix(input.matrixId, { availability: input.availability });
+    } else {
+      broadcastSignal('matrices-changed', input.matrixId);
     }
     return row;
   },
@@ -178,6 +208,7 @@ export const useMatrixStore = create<MatrixState>((set, get) => ({
     if (matrix && input.targetKind === '字符' && !row.targetRef) row.targetRef = matrix.character;
     await db.proofs.add(row);
     set((s) => ({ proofs: [row, ...s.proofs] }));
+    broadcastSignal('matrices-changed', row.matrixId || undefined);
     return row;
   },
 }));

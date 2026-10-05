@@ -34,6 +34,14 @@ export interface TypeCase {
    * 由落位操作自动维护，与 slots 中的 matrixId 保持一致。
    */
   matrixId: string[];
+  /**
+   * 布局版本号（令牌）：仅在格位布局被保存时更换，用于：
+   * - 区分两个页面先后打开时谁的版本更新，做按格位三方合并；
+   * - 编辑会话记录打开时的基线版本，旧字盘没有该字段时由 v4 升级补出初始版本。
+   */
+  layoutVersion: string;
+  /** 布局最近一次保存时间（区别于字盘档案 updatedAt，后者改基础信息也会变） */
+  layoutSavedAt: string;
   createdAt: string;
   updatedAt: string;
 }

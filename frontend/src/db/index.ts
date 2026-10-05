@@ -15,6 +15,7 @@ export const DB_NAME = 'gbmovabletype-db';
  * v1 建 matrices
  * v2 加 cases 表与 matrixId 索引
  * v3 加 defects / proofs 表，并为停用字模回填缺损原因
+ * v4 为历史字盘补出布局版本（layoutVersion / layoutSavedAt），支撑按格位合并保存
  */
 class MovableTypeDb extends Dexie {
   matrices!: Table<TypeMatrix, string>;
@@ -75,6 +76,26 @@ class MovableTypeDb extends Dexie {
             operator: '系统迁移',
             note: '由 v2 → v3 升级自动回填',
             createdAt: new Date().toISOString(),
+          });
+        }
+      });
+    this.version(4)
+      .stores({
+        matrices: 'id, code, character, font, sizeName, material, availability',
+        cases: 'id, code, kind, workStation, *matrixId',
+        defects: 'id, matrixId, defectType, severity, availability, foundDate',
+        proofs: 'id, matrixId, sampleNo, clarity, proofDate',
+      })
+      .upgrade(async (tx) => {
+        // v4：旧字盘没有布局版本数据，按当前 slots 补出初始版本，
+        // 使旧字盘也能参与按格位三方合并（首次打开即以此为基线）
+        const table = tx.table<TypeCase, string>('cases');
+        const rows: TypeCase[] = await table.toArray();
+        for (const row of rows) {
+          if (row.layoutVersion) continue;
+          await table.update(row.id, {
+            layoutVersion: `lay-init-${row.id}`,
+            layoutSavedAt: row.layoutSavedAt || row.updatedAt || new Date().toISOString(),
           });
         }
       });
@@ -207,6 +228,8 @@ function buildSeed() {
       slots: toSlots(SEED_CASE_A_SLOTS),
       workStation: '一号排字工位',
       matrixId: matrixIdsOf(toSlots(SEED_CASE_A_SLOTS)),
+      layoutVersion: 'lay-init-case-1001',
+      layoutSavedAt: now,
       createdAt: now,
       updatedAt: now,
     },
@@ -219,6 +242,8 @@ function buildSeed() {
       slots: toSlots(SEED_CASE_B_SLOTS),
       workStation: '二号排字工位',
       matrixId: matrixIdsOf(toSlots(SEED_CASE_B_SLOTS)),
+      layoutVersion: 'lay-init-case-1002',
+      layoutSavedAt: now,
       createdAt: now,
       updatedAt: now,
     },

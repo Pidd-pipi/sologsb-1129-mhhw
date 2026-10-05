@@ -3,15 +3,14 @@ import { Link } from 'react-router-dom';
 import CharacterPicker from '../components/common/CharacterPicker';
 import EmptyState from '../components/common/EmptyState';
 import LayoutGrid from '../components/common/LayoutGrid';
-import { DRAFT_KEYS, useLocalDraft } from '../hooks/useLocalDraft';
 import { useCaseSlots } from '../hooks/useCaseSlots';
 import { useMatrixSearch } from '../hooks/useMatrixSearch';
 import { useCaseStore } from '../stores/caseStore';
 import { useUiStore } from '../stores/uiStore';
-import type { CaseKind, CaseSlot, TypeCase } from '../types/case';
+import type { CaseKind, TypeCase } from '../types/case';
 import { CASE_KINDS, COL_RANGE, ROW_RANGE, describeCapacity, validateCaseInput } from '../types/case';
 import type { TypeMatrix } from '../types/matrix';
-import { suggestCaseCode } from '../utils/format';
+import { formatStamp, suggestCaseCode } from '../utils/format';
 import { rcKey, slotAt, type RCCell } from '../utils/layout';
 
 /** 字盘列表 + 新建字盘 */
@@ -230,6 +229,14 @@ interface PendingPlacement {
   matrix: TypeMatrix;
 }
 
+function cellLabel(row: number, col: number): string {
+  return `${rowLabel(row)}${col + 1}`;
+}
+
+function slotText(slot: { character: string; matrixId: string } | undefined): string {
+  return slot ? `${slot.character}（${slot.matrixId}）` : '空格（取出）';
+}
+
 function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
   const pushToast = useUiStore((s) => s.pushToast);
   const api = useCaseSlots(typeCase);
@@ -239,38 +246,36 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
   const [selectedKey, setSelectedKey] = useState('');
   const [swapFrom, setSwapFrom] = useState<RCCell | null>(null);
 
-  const { draft, patch, reset: resetDraft } = useLocalDraft<{ slots: CaseSlot[] }>(
-    DRAFT_KEYS.caseEditor(typeCase.id),
-    { slots: typeCase.slots },
-  );
-
-  /** 格位布局有未保存改动时，把编辑中的行列布局写入 localStorage 草稿 */
-  useEffect(() => {
-    if (!api.dirty) return;
-    patch({ slots: api.slots });
-  }, [api.dirty, api.slots, patch]);
-
   const charCandidates = useMemo(
     () => (pickedChar ? candidateMatrices.filter((m) => m.character === pickedChar) : []),
     [candidateMatrices, pickedChar],
   );
 
-  const draftDiffers = useMemo(
-    () => JSON.stringify(draft.slots) !== JSON.stringify(typeCase.slots),
-    [draft.slots, typeCase.slots],
-  );
-
   const selectedCell = selectedKey ? (parseKey(selectedKey) as RCCell) : null;
   const selectedSlot = selectedCell ? slotAt(api.slots, selectedCell.row, selectedCell.col) : undefined;
 
+  const unresolvedMap = useMemo(
+    () => new Map(api.merge.unresolved.map((c) => [c.key, c])),
+    [api.merge.unresolved],
+  );
+  const invalidMap = useMemo(
+    () => new Map(api.invalidSlots.map((s) => [s.key, s])),
+    [api.invalidSlots],
+  );
+
   const conflictKeys = useMemo(
     () => [
+      ...api.merge.unresolved.map((c) => c.key),
       ...api.conflicts.duplicatePositions,
       ...api.conflicts.outOfRange,
       ...api.conflicts.duplicateCharacters.flatMap((g) => g.keys),
     ],
-    [api.conflicts],
+    [api.merge.unresolved, api.conflicts],
   );
+  const invalidKeys = useMemo(() => api.invalidSlots.map((s) => s.key), [api.invalidSlots]);
+
+  const cannotSave =
+    api.saving || api.merge.hasUnresolvedConflict || api.invalidSlots.length > 0 || api.capacity.overCapacity;
 
   const handleSlotClick = (row: number, col: number) => {
     const key = rcKey(row, col);
@@ -278,7 +283,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
     if (pending) {
       api.place(pending.matrix, row, col);
       pushToast(
-        `已在 ${rowLabel(row)}${col + 1} 落位「${pending.matrix.character}」（${pending.matrix.code}）`,
+        `已在 ${cellLabel(row, col)} 落位「${pending.matrix.character}」（${pending.matrix.code}）`,
       );
       return;
     }
@@ -289,7 +294,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
       }
       api.swap(swapFrom, { row, col });
       setSwapFrom(null);
-      pushToast(`已调换 ${rowLabel(swapFrom.row)}${swapFrom.col + 1} 与 ${rowLabel(row)}${col + 1}`);
+      pushToast(`已调换 ${cellLabel(swapFrom.row, swapFrom.col)} 与 ${cellLabel(row, col)}`);
       return;
     }
     if (slotAt(api.slots, row, col)) {
@@ -300,8 +305,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
   const handleSave = async () => {
     try {
       await api.save();
-      patch({ slots: api.slots });
-      pushToast(`字盘 ${typeCase.code} 布局已保存（${api.slots.length} 格）`);
+      pushToast(`字盘 ${typeCase.code} 布局已按格位合并保存（${api.slots.length} 格）`);
     } catch (err) {
       pushToast(err instanceof Error ? err.message : '保存失败', 'error');
     }
@@ -317,11 +321,24 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
             </h3>
             <p className="mt-sub">
               {describeCapacity(typeCase.rows, typeCase.cols)} · 工位 {typeCase.workStation} · 落位率{' '}
-              {api.fillPercent}%
+              {api.fillPercent}% · 布局版本 {formatStamp(typeCase.layoutSavedAt)}
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className="mt-btn mt-btn-primary" data-testid="save-layout-btn" onClick={handleSave} disabled={api.saving}>
+            <button
+              type="button"
+              className="mt-btn mt-btn-primary"
+              data-testid="save-layout-btn"
+              onClick={handleSave}
+              disabled={cannotSave}
+              title={
+                api.merge.hasUnresolvedConflict
+                  ? '还有双方改动冲突未确认'
+                  : api.invalidSlots.length > 0
+                    ? '还有停用 / 缺损字模的失效落位未处理'
+                    : undefined
+              }
+            >
               {api.saving ? '保存中…' : api.dirty ? '保存布局（有改动）' : '保存布局'}
             </button>
             <button type="button" className="mt-btn" data-testid="revert-layout-btn" onClick={api.revert} disabled={!api.dirty}>
@@ -341,6 +358,34 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
           </div>
         </div>
 
+        {api.merge.stale ? (
+          <div
+            className="border-b border-brass/30 bg-brass-pale/60 px-4 py-2 text-xs text-brass"
+            data-testid="merge-banner"
+          >
+            <p className="font-semibold">
+              该字盘已被别的页面保存过：未冲突的 {api.merge.autoMergedCount} 格已自动并入
+              {api.merge.unresolved.length > 0
+                ? `；还有 ${api.merge.unresolved.length} 格双方都动过，请逐格确认（采用本次或已存版本）后才能保存。`
+                : api.merge.resolvedCount > 0
+                  ? `；${api.merge.resolvedCount} 格冲突已全部确认，可以保存。`
+                  : '，可以直接保存。'}
+            </p>
+          </div>
+        ) : null}
+
+        {api.invalidSlots.length > 0 ? (
+          <div
+            className="border-b border-seal/30 bg-seal-pale/70 px-4 py-2 text-xs text-seal"
+            data-testid="invalid-banner"
+          >
+            <p className="font-semibold">
+              字模可用性发生变化：盘内 {api.invalidSlots.length} 格落着停用 / 缺损 / 已删除的字模，
+              已立即失效重算，取出处理后才能保存。
+            </p>
+          </div>
+        ) : null}
+
         <div className="grid grid-cols-1 gap-3 px-4 py-3 lg:grid-cols-[1fr_300px]">
           <div className="space-y-2">
             <LayoutGrid
@@ -349,13 +394,15 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
               slots={api.slots}
               highlight={selectedCell}
               conflictKeys={conflictKeys}
+              highlightKeys={invalidKeys}
               pendingCharacter={pending?.matrix.character ?? ''}
+              invalidKeys={invalidKeys}
               onSlotClick={handleSlotClick}
               testIdPrefix="case-slot"
             />
             <div
               className={`rounded border px-3 py-2 text-xs ${
-                api.conflicts.hasConflict || api.capacity.overCapacity
+                api.conflicts.hasConflict || api.capacity.overCapacity || api.merge.hasUnresolvedConflict || api.invalidSlots.length > 0
                   ? 'border-seal/40 bg-seal-pale text-seal'
                   : 'border-paper-line bg-paper/50 text-ink-soft'
               }`}
@@ -369,16 +416,16 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                       .map((g) => `${g.character}×${g.count}`)
                       .join('、')}`
                   : ' · 无重复落位'}
-                {api.conflicts.duplicatePositions.length > 0
-                  ? ` · 同格位重复 ${api.conflicts.duplicatePositions.join('、')}`
+                {api.merge.unresolved.length > 0
+                  ? ` · 双方冲突 ${api.merge.unresolved.map((c) => cellLabel(c.row, c.col)).join('、')}`
                   : ''}
-                {api.conflicts.outOfRange.length > 0
-                  ? ` · 越界格位 ${api.conflicts.outOfRange.join('、')}`
+                {api.invalidSlots.length > 0
+                  ? ` · 失效落位 ${api.invalidSlots.map((s) => cellLabel(s.row, s.col)).join('、')}`
                   : ''}
               </p>
               {api.dirty ? (
                 <p className="mt-1" data-testid="dirty-hint">
-                  当前布局尚未保存到本机档案，点「保存布局」写回 IndexedDB。
+                  当前布局按格位合并后尚未写回 IndexedDB；冲突未确认或失效落位未处理前不能保存。
                 </p>
               ) : null}
             </div>
@@ -399,7 +446,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
               />
               <div className="mt-2 space-y-1">
                 <p className="text-[11px] text-ink-mute">
-                  可用字模候选 {charCandidates.length} 枚（按总览页筛选条件）
+                  可用字模候选 {charCandidates.length} 枚（停用 / 待补刻字模不能落位）
                 </p>
                 {pickedChar && charCandidates.length === 0 ? (
                   <p className="text-[11px] text-seal" data-testid="no-candidate">
@@ -437,7 +484,7 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
               <h4 className="mb-2 font-song text-sm font-semibold text-ink">格位操作</h4>
               <p className="text-[11px] text-ink-soft" data-testid="selected-slot-info">
                 {selectedCell
-                  ? `选中格位：${rowLabel(selectedCell.row)}${selectedCell.col + 1}${
+                  ? `选中格位：${cellLabel(selectedCell.row, selectedCell.col)}${
                       selectedSlot ? ` · ${selectedSlot.character}（${selectedSlot.matrixId}）` : ' · 空格'
                     }`
                   : '未选中格位（点击网格选择）'}
@@ -477,47 +524,117 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
               </div>
               {swapFrom ? (
                 <p className="mt-1 text-[11px] text-seal" data-testid="swap-hint">
-                  调换起点：{rowLabel(swapFrom.row)}
-                  {swapFrom.col + 1}，请点击目标格位完成调换。
+                  调换起点：{cellLabel(swapFrom.row, swapFrom.col)}，请点击目标格位完成调换。
                 </p>
               ) : null}
             </div>
 
-            <div className="rounded border border-paper-line bg-white/70 px-3 py-3" data-testid="draft-panel">
-              <h4 className="mb-2 font-song text-sm font-semibold text-ink">布局草稿</h4>
-              <p className="text-[11px] text-ink-mute" data-testid="draft-status">
-                {draftDiffers
-                  ? `存在未保存的布局草稿（${draft.slots.length} 格），刷新后可恢复`
-                  : '草稿与已保存布局一致'}
-              </p>
-              <div className="mt-2 flex flex-wrap gap-2">
+            {api.merge.unresolved.length > 0 ? (
+              <div
+                className="rounded border border-seal/40 bg-seal-pale/50 px-3 py-3"
+                data-testid="conflict-panel"
+              >
+                <h4 className="mb-1 font-song text-sm font-semibold text-seal">
+                  双方改动冲突（{api.merge.unresolved.length} 格待确认）
+                </h4>
+                <p className="mb-2 text-[11px] text-seal/90" data-testid="conflict-summary">
+                  已确认 {api.merge.resolvedCount} 格；确认前这些格位不会更新已保存布局。
+                </p>
+                <ul className="space-y-2" data-testid="conflict-list">
+                  {api.merge.unresolved.map((c) => (
+                    <li key={c.key} className="rounded border border-seal/30 bg-white/80 px-2 py-2" data-testid={`conflict-${c.key}`}>
+                      <p className="text-[11px] font-semibold text-ink">{cellLabel(c.row, c.col)} 格</p>
+                      <p className="text-[11px] text-ink-soft">本次：{slotText(c.mine)}</p>
+                      <p className="text-[11px] text-ink-soft">已存：{slotText(c.theirs)}</p>
+                      <div className="mt-1 flex flex-wrap gap-1">
+                        <button
+                          type="button"
+                          className="mt-btn !px-2 !py-1 text-[11px]"
+                          data-testid={`choose-mine-${c.key}`}
+                          onClick={() => {
+                            api.decide(c.key, 'mine');
+                            pushToast(`${cellLabel(c.row, c.col)} 采用本次编辑：${slotText(c.mine)}`);
+                          }}
+                        >
+                          采用本次
+                        </button>
+                        <button
+                          type="button"
+                          className="mt-btn !px-2 !py-1 text-[11px]"
+                          data-testid={`choose-theirs-${c.key}`}
+                          onClick={() => {
+                            api.decide(c.key, 'theirs');
+                            pushToast(`${cellLabel(c.row, c.col)} 采用已存版本：${slotText(c.theirs)}`);
+                          }}
+                        >
+                          采用已存
+                        </button>
+                        <button
+                          type="button"
+                          className="mt-btn !px-2 !py-1 text-[11px]"
+                          data-testid={`choose-empty-${c.key}`}
+                          onClick={() => {
+                            api.decide(c.key, 'empty');
+                            pushToast(`${cellLabel(c.row, c.col)} 已选为清空（取出）`, 'warn');
+                          }}
+                        >
+                          双方都取出
+                        </button>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
+            {api.invalidSlots.length > 0 ? (
+              <div
+                className="rounded border border-seal/40 bg-seal-pale/50 px-3 py-3"
+                data-testid="invalid-panel"
+              >
+                <h4 className="mb-1 font-song text-sm font-semibold text-seal">
+                  失效落位（{api.invalidSlots.length} 格）
+                </h4>
+                <p className="mb-2 text-[11px] text-seal/90">
+                  字模停用 / 缺损 / 删除后，盘里的旧落位不再可用，取出处理后才能保存。
+                </p>
+                <ul className="space-y-1" data-testid="invalid-list">
+                  {api.invalidSlots.map((s) => (
+                    <li
+                      key={s.key}
+                      className="flex flex-wrap items-center justify-between gap-1 rounded border border-seal/25 bg-white/80 px-2 py-1 text-[11px]"
+                      data-testid={`invalid-${s.key}`}
+                    >
+                      <span className="text-ink-soft">
+                        {cellLabel(s.row, s.col)} · {s.slot.character}（{s.slot.matrixId}）· {s.reason}
+                      </span>
+                      <button
+                        type="button"
+                        className="mt-btn !px-2 !py-0.5 text-[11px]"
+                        data-testid={`take-invalid-${s.key}`}
+                        onClick={() => {
+                          api.takeInvalid(s.key);
+                          pushToast(`已取出失效落位 ${cellLabel(s.row, s.col)}（${s.reason}）`, 'warn');
+                        }}
+                      >
+                        取出
+                      </button>
+                    </li>
+                  ))}
+                </ul>
                 <button
                   type="button"
-                  className="mt-btn"
-                  data-testid="restore-draft-btn"
-                  disabled={!draftDiffers}
+                  className="mt-btn mt-2 !px-2 !py-1 text-[11px]"
+                  data-testid="take-all-invalid-btn"
                   onClick={() => {
-                    api.replaceAll(draft.slots);
-                    pushToast(`已恢复草稿布局（${draft.slots.length} 格）`);
+                    api.takeAllInvalid();
+                    pushToast('已一次性取出全部失效落位', 'warn');
                   }}
                 >
-                  恢复草稿
-                </button>
-                <button
-                  type="button"
-                  className="mt-btn"
-                  data-testid="discard-draft-btn"
-                  disabled={!draftDiffers}
-                  onClick={() => {
-                    resetDraft();
-                    api.revert();
-                    pushToast('已放弃草稿', 'warn');
-                  }}
-                >
-                  放弃草稿
+                  全部取出
                 </button>
               </div>
-            </div>
+            ) : null}
 
             <Link className="mt-btn block text-center" to="/defects" data-testid="goto-defects">
               去登记缺损 / 补刻

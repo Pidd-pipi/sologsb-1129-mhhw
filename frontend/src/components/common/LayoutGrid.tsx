@@ -9,8 +9,10 @@ export interface LayoutGridProps {
   highlight?: RCCell | null;
   /** 需要额外高亮的格位（如某枚字模所在位置） */
   highlightKeys?: string[];
-  /** 冲突格位（重复落位 / 越界） */
+  /** 冲突格位（双方改动未确认 / 重复落位 / 越界） */
   conflictKeys?: string[];
+  /** 失效落位格位（停用 / 缺损 / 已删除字模） */
+  invalidKeys?: string[];
   /** 待落位字符提示 */
   pendingCharacter?: string;
   readOnly?: boolean;
@@ -28,6 +30,7 @@ export default function LayoutGrid({
   highlight,
   highlightKeys = [],
   conflictKeys = [],
+  invalidKeys = [],
   pendingCharacter = '',
   readOnly = false,
   onSlotClick,
@@ -35,6 +38,7 @@ export default function LayoutGrid({
 }: LayoutGridProps) {
   const highlightSet = new Set(highlightKeys);
   const conflictSet = new Set(conflictKeys);
+  const invalidSet = new Set(invalidKeys);
 
   return (
     <div className="overflow-x-auto">
@@ -67,6 +71,7 @@ export default function LayoutGrid({
                 const isSelected = highlight?.row === r && highlight?.col === c;
                 const isHighlighted = highlightSet.has(key);
                 const isConflict = conflictSet.has(key);
+                const isInvalid = invalidSet.has(key);
                 const canClick = !readOnly && Boolean(onSlotClick);
                 return (
                   <button
@@ -74,14 +79,22 @@ export default function LayoutGrid({
                     type="button"
                     disabled={!canClick}
                     onClick={() => onSlotClick?.(r, c)}
-                    title={`${ROW_LABELS[r] ?? r + 1}${c + 1} ${slot ? slot.character : '空格'}`}
+                    title={`${ROW_LABELS[r] ?? r + 1}${c + 1} ${slot ? slot.character : '空格'}${
+                      isInvalid ? '（字模已停用 / 缺损）'
+                      : isConflict ? '（双方改动冲突）'
+                      : ''
+                    }`}
                     data-testid={`${testIdPrefix}-${r}-${c}`}
                     data-filled={slot ? '1' : '0'}
+                    data-conflict={isConflict ? '1' : undefined}
+                    data-invalid={isInvalid ? '1' : undefined}
                     className={`flex h-11 flex-col items-center justify-center rounded border text-center transition ${
                       slot ? 'border-ink/25 bg-white shadow-press' : 'border-dashed border-paper-line bg-paper/50'
                     } ${isSelected ? 'ring-2 ring-seal' : ''} ${
                       isHighlighted ? 'ring-2 ring-brass' : ''
                     } ${isConflict ? 'border-seal bg-seal-pale' : ''} ${
+                      isInvalid ? 'border-seal border-dashed bg-seal-pale/40' : ''
+                    } ${
                       canClick ? 'cursor-pointer hover:border-seal' : 'cursor-default'
                     } ${pendingCharacter && !slot ? 'hover:bg-brass-pale' : ''}`}
                   >

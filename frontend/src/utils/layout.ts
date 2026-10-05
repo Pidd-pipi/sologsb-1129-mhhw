@@ -160,3 +160,140 @@ export function fillRate(slots: CaseSlot[], rows: number, cols: number): number 
 export function findSlotsByMatrix(slots: CaseSlot[], matrixId: string): CaseSlot[] {
   return slots.filter((s) => s.matrixId === matrixId);
 }
+
+/* ------------------------------------------------------------------ */
+/* 按格位三方合并（base 为打开页面时的布局，mine 为本次编辑，theirs 为别人后保存的布局） */
+/* ------------------------------------------------------------------ */
+
+/** 空格位的统一标记，空格与空格视为相同内容 */
+export const EMPTY_CELL = '__empty__';
+
+/** 格位内容签名：同一枚字模即同一内容（落位时间变化不视为内容变化） */
+export function slotSignature(slot: CaseSlot | undefined): string {
+  return slot ? slot.matrixId || `${EMPTY_CELL}:${slot.character}` : EMPTY_CELL;
+}
+
+function slotsToMap(slots: CaseSlot[]): Map<string, CaseSlot> {
+  const map = new Map<string, CaseSlot>();
+  for (const s of slots) map.set(rcKey(s.row, s.col), s);
+  return map;
+}
+
+export interface CellMergeConflict {
+  /** 格位键 `行-列` */
+  key: string;
+  row: number;
+  col: number;
+  /** 本次编辑版本的落位（取出为 undefined） */
+  mine: CaseSlot | undefined;
+  /** 已存（别人）版本的落位（取出为 undefined） */
+  theirs: CaseSlot | undefined;
+}
+
+export interface MergeResult {
+  /** 自动合并后的落位；冲突格位先以「本次编辑」占位，等待逐格裁决 */
+  slots: CaseSlot[];
+  /** 同一格双方都动过且内容不同，需逐格确认 */
+  conflicts: CellMergeConflict[];
+  /** 冲突格位键集合 */
+  conflictKeys: string[];
+  /** 相对基线发生变化的格位键（无论由谁改动） */
+  changedKeys: string[];
+  /** 是否存在相对基线的变化 */
+  hasChanges: boolean;
+}
+
+/**
+ * 按格位三方合并：
+ * - 只有一方动过：落位 / 取出 / 调换照常并入；
+ * - 双方都没动：保持基线；
+ * - 同一格双方都动过且改成不同内容：列为冲突，确认前不写入已保存布局。
+ */
+export function mergeLayouts(base: CaseSlot[], mine: CaseSlot[], theirs: CaseSlot[]): MergeResult {
+  const baseMap = slotsToMap(base);
+  const mineMap = slotsToMap(mine);
+  const theirsMap = slotsToMap(theirs);
+
+  const keys = new Set<string>([...baseMap.keys(), ...mineMap.keys(), ...theirsMap.keys()]);
+  const merged: CaseSlot[] = [];
+  const conflicts: CellMergeConflict[] = [];
+  const changedKeys: string[] = [];
+
+  keys.forEach((key) => {
+    const b = baseMap.get(key);
+    const m = mineMap.get(key);
+    const t = theirsMap.get(key);
+    const mineChanged = slotSignature(m) !== slotSignature(b);
+    const theirsChanged = slotSignature(t) !== slotSignature(b);
+
+    if (mineChanged && theirsChanged && slotSignature(m) !== slotSignature(t)) {
+      conflicts.push({ key, row: m?.row ?? t?.row ?? 0, col: m?.col ?? t?.col ?? 0, mine: m, theirs: t });
+      changedKeys.push(key);
+      // 冲突格先呈现本次编辑版本，最终值由逐格裁决覆盖
+      if (m) merged.push(m);
+      return;
+    }
+
+    // 任一方改动（含双方改成相同内容）即采用改动值；都没动则保持基线
+    const winner = theirsChanged ? t : mineChanged ? m : b;
+    if (slotSignature(winner) !== slotSignature(b)) changedKeys.push(key);
+    if (winner) merged.push(winner);
+  });
+
+  merged.sort((a, b) => a.row - b.row || a.col - b.col);
+  return {
+    slots: merged,
+    conflicts,
+    conflictKeys: conflicts.map((c) => c.key),
+    changedKeys,
+    hasChanges: changedKeys.length > 0,
+  };
+}
+
+/** 冲突格的逐格裁决选择：采用本次编辑 / 采用已存版本 / 取出清空 */
+export type ConflictChoice = 'mine' | 'theirs' | 'empty';
+
+/** 取出若干格位后返回新数组（批量处理失效落位用） */
+export function removeSlots(slots: CaseSlot[], keys: Iterable<string>): CaseSlot[] {
+  const keySet = new Set(keys);
+  return slots.filter((s) => !keySet.has(rcKey(s.row, s.col)));
+}
+
+/* ------------------------------------------------------------------ */
+/* 字模可用性失效：停用 / 待补刻 / 已删除的字模，盘里的旧落位不可再当可用 */
+/* ------------------------------------------------------------------ */
+
+export interface InvalidSlot {
+  key: string;
+  row: number;
+  col: number;
+  slot: CaseSlot;
+  /** 失效原因：停用 / 待补刻 / 字模已删除 */
+  reason: string;
+}
+
+/**
+ * 重算布局中的失效落位：所引用字模不是「可用」（含查无此模的删除情况）即失效。
+ * 字模可用性变化后据此立即重算，处理完前不允许保存。
+ */
+export function findInvalidSlots(
+  slots: CaseSlot[],
+  matrixById: Map<string, { availability: string }>,
+): InvalidSlot[] {
+  const out: InvalidSlot[] = [];
+  for (const s of slots) {
+    const matrix = matrixById.get(s.matrixId);
+    if (!matrix) {
+      out.push({ key: rcKey(s.row, s.col), row: s.row, col: s.col, slot: s, reason: '字模档案已删除' });
+    } else if (matrix.availability !== '可用') {
+      out.push({
+        key: rcKey(s.row, s.col),
+        row: s.row,
+        col: s.col,
+        slot: s,
+        reason: `字模已${matrix.availability}`,
+      });
+    }
+  }
+  return out;
+}

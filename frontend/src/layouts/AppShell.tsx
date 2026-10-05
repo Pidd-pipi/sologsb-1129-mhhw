@@ -3,6 +3,7 @@ import { NavLink, Outlet, useLocation } from 'react-router-dom';
 import { useCaseStore } from '../stores/caseStore';
 import { useMatrixStore } from '../stores/matrixStore';
 import { useUiStore } from '../stores/uiStore';
+import { subscribeSignal } from '../utils/broadcast';
 
 const NAV = [
   { to: '/', label: '字模总览', testId: 'nav-overview', end: true },
@@ -22,6 +23,8 @@ export default function AppShell() {
   const location = useLocation();
   const loadMatrices = useMatrixStore((s) => s.load);
   const loadCases = useCaseStore((s) => s.load);
+  const reloadMatricesQuiet = useMatrixStore((s) => s.reloadQuiet);
+  const reloadCasesQuiet = useCaseStore((s) => s.reloadQuiet);
   const matrixCount = useMatrixStore((s) => s.matrices.length);
   const disabledCount = useMatrixStore(
     (s) => s.matrices.filter((m) => m.availability === '停用').length,
@@ -37,6 +40,16 @@ export default function AppShell() {
     void loadMatrices();
     void loadCases();
   }, [loadMatrices, loadCases]);
+
+  // 另一个页面保存字盘布局或改变字模可用性时，静默刷新本地缓存：
+  // 字盘编辑器据此立即重算三方合并与失效落位，无需手动刷新。
+  useEffect(() => {
+    const unsubscribe = subscribeSignal((signal) => {
+      if (signal.type === 'cases-changed') void reloadCasesQuiet();
+      if (signal.type === 'matrices-changed') void reloadMatricesQuiet();
+    });
+    return unsubscribe;
+  }, [reloadCasesQuiet, reloadMatricesQuiet]);
 
   useEffect(() => {
     if (!toast) return;
