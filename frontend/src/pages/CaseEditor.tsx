@@ -3,22 +3,23 @@ import { Link } from 'react-router-dom';
 import CharacterPicker from '../components/common/CharacterPicker';
 import EmptyState from '../components/common/EmptyState';
 import LayoutGrid from '../components/common/LayoutGrid';
-import { DRAFT_KEYS, useLocalDraft } from '../hooks/useLocalDraft';
 import { useCaseSlots } from '../hooks/useCaseSlots';
 import { useMatrixSearch } from '../hooks/useMatrixSearch';
 import { useCaseStore } from '../stores/caseStore';
+import { useMatrixStore } from '../stores/matrixStore';
 import { useUiStore } from '../stores/uiStore';
-import type { CaseKind, CaseSlot, TypeCase } from '../types/case';
+import type { CaseKind, TypeCase } from '../types/case';
 import { CASE_KINDS, COL_RANGE, ROW_RANGE, describeCapacity, validateCaseInput } from '../types/case';
 import type { TypeMatrix } from '../types/matrix';
 import { suggestCaseCode } from '../utils/format';
-import { rcKey, slotAt, type RCCell } from '../utils/layout';
+import { findInvalidSlots, rcKey, slotAt, type RCCell } from '../utils/layout';
 
 /** 字盘列表 + 新建字盘 */
 export default function CaseEditor() {
   const cases = useCaseStore((s) => s.cases);
   const loaded = useCaseStore((s) => s.loaded);
   const createCase = useCaseStore((s) => s.createCase);
+  const matrices = useMatrixStore((s) => s.matrices);
   const selectedCaseId = useUiStore((s) => s.selectedCaseId);
   const setSelectedCaseId = useUiStore((s) => s.setSelectedCaseId);
   const pushToast = useUiStore((s) => s.pushToast);
@@ -36,6 +37,16 @@ export default function CaseEditor() {
     () => cases.find((c) => c.id === selectedCaseId) ?? cases[0],
     [cases, selectedCaseId],
   );
+
+  /** 各字盘已存布局中引用停用 / 缺损字模的格位数（清单角标） */
+  const invalidCountByCase = useMemo(() => {
+    const out = new Map<string, number>();
+    for (const c of cases) {
+      const n = findInvalidSlots(c.slots, matrices).length;
+      if (n) out.set(c.id, n);
+    }
+    return out;
+  }, [cases, matrices]);
 
   useEffect(() => {
     if (!selectedCaseId && cases.length > 0) setSelectedCaseId(cases[0].id);
@@ -75,7 +86,7 @@ export default function CaseEditor() {
             字盘布局编辑器
           </h2>
           <p className="mt-sub">
-            选中字盘后以行列网格呈现，点击格位落位、取出或调换字符，实时提示空格与重复落位。
+            选中字盘后以行列网格呈现，点击格位落位、取出或调换；多页面按格位合并保存，冲突逐格取舍。
           </p>
         </div>
         <span className="mt-chip" data-testid="case-count">
@@ -95,26 +106,38 @@ export default function CaseEditor() {
                   {loaded ? '暂无字盘，请在下方新建。' : '正在读取字盘档案…'}
                 </li>
               ) : (
-                cases.map((c) => (
-                  <li key={c.id}>
-                    <button
-                      type="button"
-                      data-testid={`case-item-${c.id}`}
-                      onClick={() => setSelectedCaseId(c.id)}
-                      className={`flex w-full flex-col items-start gap-0.5 px-4 py-2 text-left transition hover:bg-paper-deep/60 ${
-                        selected?.id === c.id ? 'bg-seal-pale/70' : ''
-                      }`}
-                    >
-                      <span className="font-song text-sm text-ink">
-                        {c.code}
-                        <span className="ml-2 text-[11px] text-ink-mute">{c.kind}</span>
-                      </span>
-                      <span className="text-[11px] text-ink-mute">
-                        {describeCapacity(c.rows, c.cols)} · 已落位 {c.slots.length} · {c.workStation}
-                      </span>
-                    </button>
-                  </li>
-                ))
+                cases.map((c) => {
+                  const invalidCount = invalidCountByCase.get(c.id) ?? 0;
+                  return (
+                    <li key={c.id}>
+                      <button
+                        type="button"
+                        data-testid={`case-item-${c.id}`}
+                        onClick={() => setSelectedCaseId(c.id)}
+                        className={`flex w-full flex-col items-start gap-0.5 px-4 py-2 text-left transition hover:bg-paper-deep/60 ${
+                          selected?.id === c.id ? 'bg-seal-pale/70' : ''
+                        }`}
+                      >
+                        <span className="font-song text-sm text-ink">
+                          {c.code}
+                          <span className="ml-2 text-[11px] text-ink-mute">{c.kind}</span>
+                          <span className="ml-2 text-[10px] text-ink-mute">v{c.layoutVersion ?? 1}</span>
+                          {invalidCount > 0 ? (
+                            <span
+                              className="ml-2 rounded-full bg-seal px-1.5 py-0.5 text-[10px] text-paper"
+                              data-testid={`case-invalid-badge-${c.id}`}
+                            >
+                              {invalidCount} 格停用
+                            </span>
+                          ) : null}
+                        </span>
+                        <span className="text-[11px] text-ink-mute">
+                          {describeCapacity(c.rows, c.cols)} · 已落位 {c.slots.length} · {c.workStation}
+                        </span>
+                      </button>
+                    </li>
+                  );
+                })
               )}
             </ul>
           </div>
@@ -239,31 +262,15 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
   const [selectedKey, setSelectedKey] = useState('');
   const [swapFrom, setSwapFrom] = useState<RCCell | null>(null);
 
-  const { draft, patch, reset: resetDraft } = useLocalDraft<{ slots: CaseSlot[] }>(
-    DRAFT_KEYS.caseEditor(typeCase.id),
-    { slots: typeCase.slots },
-  );
-
-  /** 格位布局有未保存改动时，把编辑中的行列布局写入 localStorage 草稿 */
-  useEffect(() => {
-    if (!api.dirty) return;
-    patch({ slots: api.slots });
-  }, [api.dirty, api.slots, patch]);
-
   const charCandidates = useMemo(
     () => (pickedChar ? candidateMatrices.filter((m) => m.character === pickedChar) : []),
     [candidateMatrices, pickedChar],
   );
 
-  const draftDiffers = useMemo(
-    () => JSON.stringify(draft.slots) !== JSON.stringify(typeCase.slots),
-    [draft.slots, typeCase.slots],
-  );
-
   const selectedCell = selectedKey ? (parseKey(selectedKey) as RCCell) : null;
   const selectedSlot = selectedCell ? slotAt(api.slots, selectedCell.row, selectedCell.col) : undefined;
 
-  const conflictKeys = useMemo(
+  const localConflictKeys = useMemo(
     () => [
       ...api.conflicts.duplicatePositions,
       ...api.conflicts.outOfRange,
@@ -271,6 +278,15 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
     ],
     [api.conflicts],
   );
+
+  const invalidKeys = useMemo(
+    () => api.invalidSlots.map((inv) => inv.key),
+    [api.invalidSlots],
+  );
+
+  const unresolvedConflicts = api.merge.conflicts;
+  const canSave =
+    !api.saving && unresolvedConflicts.length === 0 && api.invalidSlots.length === 0;
 
   const handleSlotClick = (row: number, col: number) => {
     const key = rcKey(row, col);
@@ -298,12 +314,11 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
   };
 
   const handleSave = async () => {
-    try {
-      await api.save();
-      patch({ slots: api.slots });
-      pushToast(`字盘 ${typeCase.code} 布局已保存（${api.slots.length} 格）`);
-    } catch (err) {
-      pushToast(err instanceof Error ? err.message : '保存失败', 'error');
+    const res = await api.save();
+    if (res.ok) {
+      pushToast(`字盘 ${typeCase.code} 布局已保存（v${res.layoutVersion}，${api.slots.length} 格）`);
+    } else {
+      pushToast(res.message ?? '保存失败', 'error');
     }
   };
 
@@ -314,6 +329,9 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
           <div>
             <h3 className="font-song text-sm font-semibold text-ink">
               {typeCase.code} · {typeCase.kind}
+              <span className="ml-2 text-[11px] font-normal text-ink-mute">
+                v{typeCase.layoutVersion ?? 1}
+              </span>
             </h3>
             <p className="mt-sub">
               {describeCapacity(typeCase.rows, typeCase.cols)} · 工位 {typeCase.workStation} · 落位率{' '}
@@ -321,11 +339,38 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
-            <button type="button" className="mt-btn mt-btn-primary" data-testid="save-layout-btn" onClick={handleSave} disabled={api.saving}>
-              {api.saving ? '保存中…' : api.dirty ? '保存布局（有改动）' : '保存布局'}
+            <button
+              type="button"
+              className="mt-btn mt-btn-primary"
+              data-testid="save-layout-btn"
+              onClick={handleSave}
+              disabled={!canSave}
+              title={
+                unresolvedConflicts.length > 0
+                  ? '请先逐格处理合并冲突'
+                  : api.invalidSlots.length > 0
+                    ? '请先取出或替换停用 / 缺损字模'
+                    : undefined
+              }
+            >
+              {api.saving
+                ? '保存中…'
+                : unresolvedConflicts.length > 0
+                  ? `保存布局（${unresolvedConflicts.length} 格冲突待处理）`
+                  : api.invalidSlots.length > 0
+                    ? `保存布局（${api.invalidSlots.length} 格失效待处理）`
+                    : api.dirty
+                      ? '保存布局（有改动）'
+                      : '保存布局'}
             </button>
-            <button type="button" className="mt-btn" data-testid="revert-layout-btn" onClick={api.revert} disabled={!api.dirty}>
-              撤回落库版本
+            <button
+              type="button"
+              className="mt-btn"
+              data-testid="revert-layout-btn"
+              onClick={api.revert}
+              disabled={!api.dirty}
+            >
+              撤回到打开时
             </button>
             <button
               type="button"
@@ -343,12 +388,122 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
 
         <div className="grid grid-cols-1 gap-3 px-4 py-3 lg:grid-cols-[1fr_300px]">
           <div className="space-y-2">
+            {/* 合并冲突：双方页面都改过的格位，须逐格取舍后才写入已保存布局 */}
+            {unresolvedConflicts.length > 0 ? (
+              <div
+                className="rounded border border-brass/60 bg-brass-pale/70 px-3 py-2"
+                data-testid="merge-conflict-panel"
+              >
+                <p className="text-xs font-semibold text-brass">
+                  {unresolvedConflicts.length} 格与另一页面的改动冲突，请逐格确认采用哪一版，确认前不更新已保存布局。
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {unresolvedConflicts.map((c) => {
+                    const cell = parseKey(c.key);
+                    return (
+                      <li
+                        key={c.key}
+                        className="flex flex-wrap items-center gap-2 text-[11px] text-ink-soft"
+                        data-testid={`merge-conflict-${c.key}`}
+                      >
+                        <span className="font-song font-semibold">
+                          {cell ? rowLabel(cell.row) : ''}
+                          {cell ? cell.col + 1 : c.key}
+                        </span>
+                        <span>本次：{c.local ? `${c.local.character}（${c.local.matrixId}）` : '空'}</span>
+                        <span>
+                          已存：{c.saved ? `${c.saved.character}（${c.saved.matrixId}）` : '空'}
+                        </span>
+                        <button
+                          type="button"
+                          className="rounded border border-brass bg-white px-1.5 py-0.5 hover:bg-brass-pale"
+                          data-testid={`conflict-local-${c.key}`}
+                          onClick={() => api.resolveConflict(c.key, 'local')}
+                        >
+                          采用本次
+                        </button>
+                        <button
+                          type="button"
+                          className="rounded border border-brass bg-white px-1.5 py-0.5 hover:bg-brass-pale"
+                          data-testid={`conflict-saved-${c.key}`}
+                          onClick={() => api.resolveConflict(c.key, 'saved')}
+                        >
+                          采用已存
+                        </button>
+                      </li>
+                    );
+                  })}
+                </ul>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    className="rounded border border-brass bg-white px-2 py-0.5 text-[11px] hover:bg-brass-pale"
+                    data-testid="conflict-all-local"
+                    onClick={() => api.resolveAll('local')}
+                  >
+                    全部采用本次
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded border border-brass bg-white px-2 py-0.5 text-[11px] hover:bg-brass-pale"
+                    data-testid="conflict-all-saved"
+                    onClick={() => api.resolveAll('saved')}
+                  >
+                    全部采用已存
+                  </button>
+                </div>
+              </div>
+            ) : null}
+
+            {/* 失效格位：字模已停用 / 待补刻 / 档案缺失，保存前必须取出或替换 */}
+            {api.invalidSlots.length > 0 ? (
+              <div
+                className="rounded border border-seal/50 bg-seal-pale/70 px-3 py-2"
+                data-testid="invalid-slots-panel"
+              >
+                <p className="text-xs font-semibold text-seal">
+                  {api.invalidSlots.length} 格字模已停用或缺损，旧编辑已失效重算，请取出或替换后再保存。
+                </p>
+                <ul className="mt-1 space-y-1">
+                  {api.invalidSlots.map((inv) => (
+                    <li
+                      key={inv.key}
+                      className="flex flex-wrap items-center gap-2 text-[11px] text-ink-soft"
+                      data-testid={`invalid-slot-${inv.key}`}
+                    >
+                      <span className="font-song font-semibold">
+                        {rowLabel(inv.row)}
+                        {inv.col + 1}
+                      </span>
+                      <span>
+                        {inv.character}（{inv.matrixId}）·{' '}
+                        {inv.reason === 'missing' ? '字模档案已删除' : inv.availability}
+                      </span>
+                      <button
+                        type="button"
+                        className="rounded border border-seal bg-white px-1.5 py-0.5 text-seal hover:bg-seal-pale"
+                        data-testid={`invalid-take-${inv.key}`}
+                        onClick={() => {
+                          api.take(inv.row, inv.col);
+                          pushToast(`已取出 ${rowLabel(inv.row)}${inv.col + 1} 的失效字模（尚未保存）`, 'warn');
+                        }}
+                      >
+                        取出
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+
             <LayoutGrid
               rows={typeCase.rows}
               cols={typeCase.cols}
               slots={api.slots}
               highlight={selectedCell}
-              conflictKeys={conflictKeys}
+              conflictKeys={localConflictKeys}
+              mergeConflictKeys={unresolvedConflicts.map((c) => c.key)}
+              invalidKeys={invalidKeys}
               pendingCharacter={pending?.matrix.character ?? ''}
               onSlotClick={handleSlotClick}
               testIdPrefix="case-slot"
@@ -375,10 +530,13 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                 {api.conflicts.outOfRange.length > 0
                   ? ` · 越界格位 ${api.conflicts.outOfRange.join('、')}`
                   : ''}
+                {api.merge.autoMergedSaved.length > 0
+                  ? ` · 已自动合并另一页面 ${api.merge.autoMergedSaved.length} 处改动`
+                  : ''}
               </p>
               {api.dirty ? (
                 <p className="mt-1" data-testid="dirty-hint">
-                  当前布局尚未保存到本机档案，点「保存布局」写回 IndexedDB。
+                  当前布局尚未保存到本机档案，点「保存布局」按格位合并写回 IndexedDB。
                 </p>
               ) : null}
             </div>
@@ -486,8 +644,8 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
             <div className="rounded border border-paper-line bg-white/70 px-3 py-3" data-testid="draft-panel">
               <h4 className="mb-2 font-song text-sm font-semibold text-ink">布局草稿</h4>
               <p className="text-[11px] text-ink-mute" data-testid="draft-status">
-                {draftDiffers
-                  ? `存在未保存的布局草稿（${draft.slots.length} 格），刷新后可恢复`
+                {api.draftDiffers
+                  ? `存在未保存的布局草稿（${api.slots.length} 格），刷新或关页后重开可继续处理冲突`
                   : '草稿与已保存布局一致'}
               </p>
               <div className="mt-2 flex flex-wrap gap-2">
@@ -495,10 +653,10 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                   type="button"
                   className="mt-btn"
                   data-testid="restore-draft-btn"
-                  disabled={!draftDiffers}
+                  disabled={!api.draftDiffers}
                   onClick={() => {
-                    api.replaceAll(draft.slots);
-                    pushToast(`已恢复草稿布局（${draft.slots.length} 格）`);
+                    api.restoreDraft();
+                    pushToast(`已恢复草稿布局（${api.slots.length} 格）`);
                   }}
                 >
                   恢复草稿
@@ -507,10 +665,9 @@ function CaseLayoutEditor({ typeCase }: { typeCase: TypeCase }) {
                   type="button"
                   className="mt-btn"
                   data-testid="discard-draft-btn"
-                  disabled={!draftDiffers}
+                  disabled={!api.draftDiffers}
                   onClick={() => {
-                    resetDraft();
-                    api.revert();
+                    api.discardDraft();
                     pushToast('已放弃草稿', 'warn');
                   }}
                 >

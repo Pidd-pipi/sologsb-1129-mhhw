@@ -34,6 +34,11 @@ export interface TypeCase {
    * 由落位操作自动维护，与 slots 中的 matrixId 保持一致。
    */
   matrixId: string[];
+  /**
+   * 布局版本号：每次格位保存成功后 +1，用于多页面按格位合并与旧档识别。
+   * 历史字盘由 v4 迁移补写为 1。
+   */
+  layoutVersion: number;
   createdAt: string;
   updatedAt: string;
 }

@@ -9,8 +9,12 @@ export interface LayoutGridProps {
   highlight?: RCCell | null;
   /** 需要额外高亮的格位（如某枚字模所在位置） */
   highlightKeys?: string[];
-  /** 冲突格位（重复落位 / 越界） */
+  /** 编辑内容自身冲突格位（重复落位 / 越界） */
   conflictKeys?: string[];
+  /** 多页面合并时双方都改过、尚未取舍的冲突格位 */
+  mergeConflictKeys?: string[];
+  /** 落位字模已停用 / 缺损 / 缺失的失效格位 */
+  invalidKeys?: string[];
   /** 待落位字符提示 */
   pendingCharacter?: string;
   readOnly?: boolean;
@@ -28,6 +32,8 @@ export default function LayoutGrid({
   highlight,
   highlightKeys = [],
   conflictKeys = [],
+  mergeConflictKeys = [],
+  invalidKeys = [],
   pendingCharacter = '',
   readOnly = false,
   onSlotClick,
@@ -35,6 +41,8 @@ export default function LayoutGrid({
 }: LayoutGridProps) {
   const highlightSet = new Set(highlightKeys);
   const conflictSet = new Set(conflictKeys);
+  const mergeConflictSet = new Set(mergeConflictKeys);
+  const invalidSet = new Set(invalidKeys);
 
   return (
     <div className="overflow-x-auto">
@@ -67,6 +75,8 @@ export default function LayoutGrid({
                 const isSelected = highlight?.row === r && highlight?.col === c;
                 const isHighlighted = highlightSet.has(key);
                 const isConflict = conflictSet.has(key);
+                const isMergeConflict = mergeConflictSet.has(key);
+                const isInvalid = invalidSet.has(key);
                 const canClick = !readOnly && Boolean(onSlotClick);
                 return (
                   <button
@@ -74,17 +84,29 @@ export default function LayoutGrid({
                     type="button"
                     disabled={!canClick}
                     onClick={() => onSlotClick?.(r, c)}
-                    title={`${ROW_LABELS[r] ?? r + 1}${c + 1} ${slot ? slot.character : '空格'}`}
+                    title={`${ROW_LABELS[r] ?? r + 1}${c + 1} ${slot ? slot.character : '空格'}${
+                      isInvalid ? '（字模已停用 / 缺损，需取出或替换）' : ''
+                    }${isMergeConflict ? '（双方改动冲突，待取舍）' : ''}`}
                     data-testid={`${testIdPrefix}-${r}-${c}`}
                     data-filled={slot ? '1' : '0'}
-                    className={`flex h-11 flex-col items-center justify-center rounded border text-center transition ${
+                    className={`relative flex h-11 flex-col items-center justify-center rounded border text-center transition ${
                       slot ? 'border-ink/25 bg-white shadow-press' : 'border-dashed border-paper-line bg-paper/50'
                     } ${isSelected ? 'ring-2 ring-seal' : ''} ${
                       isHighlighted ? 'ring-2 ring-brass' : ''
                     } ${isConflict ? 'border-seal bg-seal-pale' : ''} ${
+                      isMergeConflict ? 'ring-2 ring-brass bg-brass-pale' : ''
+                    } ${isInvalid ? 'ring-2 ring-seal' : ''} ${
                       canClick ? 'cursor-pointer hover:border-seal' : 'cursor-default'
                     } ${pendingCharacter && !slot ? 'hover:bg-brass-pale' : ''}`}
                   >
+                    {isInvalid ? (
+                      <span
+                        className="absolute right-0.5 top-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-seal text-[8px] leading-none text-paper"
+                        data-testid={`${testIdPrefix}-${r}-${c}-invalid`}
+                      >
+                        !
+                      </span>
+                    ) : null}
                     <span className="font-song text-lg leading-none text-ink">{slot?.character ?? ''}</span>
                     {slot ? (
                       <span className="mt-0.5 text-[9px] leading-none text-ink-mute">{slot.matrixId}</span>
